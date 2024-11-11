@@ -56,8 +56,7 @@ def default_FAISS():
 
 all_docstores = {name: FAISS.load_local(name, embedder, allow_dangerous_deserialization=True) for name in glob.glob('*_docstore_index')}
 
-all_docstores_func = lambda key: all_docstores[key]
-all_retrievers = {name: all_docstores[name].as_retriever() for name in all_docstores}
+all_retrievers = lambda x: all_docstores[x].as_retriever()
 
 def get_traceback(e):
     lines = traceback.format_exception(type(e), e, e.__traceback__)
@@ -157,7 +156,7 @@ def save_memory_and_get_output(d, vstore):
 
 @chain
 def custom_chain(input_dict):
-    retriever = all_retrievers[input_dict['doc_index']]
+    retriever = all_retrievers(input_dict['doc_index'])
     return retriever.invoke(input_dict['input'])
 
 chat_prompt = ChatPromptTemplate.from_messages([("system",
@@ -319,11 +318,11 @@ def update_dropdown_options(text_input):
     options = text_input.split()  # Split text into words as options
     return gr.update(choices=glob.glob('*_docstore_index'))  # Update dropdown with new options
 
-# def update_docstore(text_input):
-#     # Example: Create dropdown options based on words in the textbox
-#     global doccstore
-#     doccstore = FAISS.load_local(text_input, embedder, allow_dangerous_deserialization=True)
-#     return doccstore
+def update_docstore(text_input):
+    # Example: Create dropdown options based on words in the textbox
+    global all_docstores
+    if text_input not in all_docstores:
+        all_docstores[text_input] = FAISS.load_local(text_input, embedder, allow_dangerous_deserialization=True)
         
 def get_demo():
     with gr.Blocks(css=CSS, theme=THEME) as demo:
@@ -367,7 +366,7 @@ def get_demo():
 
         progress_output.change(fn=update_dropdown_options, inputs=progress_output, outputs=doc_index)
         
-        # doc_index.input(fn=update_docstore, inputs=doc_index, outputs=progress_output)
+        doc_index.input(fn=update_docstore, inputs=doc_index, outputs=[])
 
 
         with gr.Row():
