@@ -1,8 +1,3 @@
-
-## NOTE: THIS SERVER IS RUNNING PERPETUALLY FOR THIS COURSE.
-## DO NOT CHANGE CODE HERE; INSTEAD, INTERFACE WITH IT VIA USER INTERFACE
-## AND BY DEPLOYING ON PORT :9012
-
 import os
 import random
 import glob
@@ -20,7 +15,7 @@ from langchain_community.document_transformers import LongContextReorder
 from langchain_core.documents import Document
 from langchain.prompts import ChatPromptTemplate, PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_core.runnables import RunnableLambda, RunnableBranch, RunnablePassthrough
+from langchain_core.runnables import RunnableLambda, RunnableBranch, RunnablePassthrough, chain
 
 from langchain_core.runnables.passthrough import RunnableAssign
 from langchain_community.vectorstores import FAISS
@@ -38,6 +33,8 @@ from typing import List
 
 import logging
 import traceback
+from faiss import IndexFlatL2
+from langchain_community.docstore.in_memory import InMemoryDocstore
 
 nvidia_api_key = "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"
 
@@ -45,6 +42,22 @@ nvidia_api_key = "nvapi-Vx-BZsnNoWmfrMfPlbevyqL9lMjcPIpTXSnQwDfhEZE_gbmvRlkRsYYQ
 embedder = NVIDIAEmbeddings(model="nvidia/nv-embed-v1", truncate="END", api_key = nvidia_api_key)
 
 instruct_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct", api_key = nvidia_api_key)
+
+embed_dims = len(embedder.embed_query("test"))
+def default_FAISS():
+    '''Useful utility for making an empty FAISS vectorstore'''
+    return FAISS(
+        embedding_function=embedder,
+        index=IndexFlatL2(embed_dims),
+        docstore=InMemoryDocstore(),
+        index_to_docstore_id={},
+        normalize_L2=False
+    )
+
+all_docstores = {name: FAISS.load_local(name, embedder, allow_dangerous_deserialization=True) for name in glob.glob('*_docstore_index')}
+
+all_docstores_func = lambda key: all_docstores[key]
+all_retrievers = {name: all_docstores[name].as_retriever() for name in all_docstores}
 
 def get_traceback(e):
     lines = traceback.format_exception(type(e), e, e.__traceback__)
@@ -99,6 +112,7 @@ def RPrint(preface=""):
         if preface: print(preface, end="")
         print(x)
         print(instruct_llm)
+        # print(doccstore)
         return x
     return RunnableLambda(partial(print_and_return, preface=preface))
 
@@ -130,19 +144,6 @@ def assert_docs(d):
 
 ## Conversation Retrival
 
-from faiss import IndexFlatL2
-from langchain_community.docstore.in_memory import InMemoryDocstore
-
-embed_dims = len(embedder.embed_query("test"))
-def default_FAISS():
-    '''Useful utility for making an empty FAISS vectorstore'''
-    return FAISS(
-        embedding_function=embedder,
-        index=IndexFlatL2(embed_dims),
-        docstore=InMemoryDocstore(),
-        index_to_docstore_id={},
-        normalize_L2=False
-    )
 
 convstore = default_FAISS()
 
@@ -153,6 +154,11 @@ def save_memory_and_get_output(d, vstore):
         f"Agent previously responded with {d.get('output')}"
     ])
     return d.get('output')
+
+@chain
+def custom_chain(input_dict):
+    retriever = all_retrievers[input_dict['doc_index']]
+    return retriever.invoke(input_dict['input'])
 
 chat_prompt = ChatPromptTemplate.from_messages([("system",
     "You are a document chatbot. Help the user as they ask questions about documents."
@@ -165,13 +171,13 @@ chat_prompt = ChatPromptTemplate.from_messages([("system",
 
 ## Document Retrival
 
-docstore = FAISS.load_local("default_docstore_index", embedder, allow_dangerous_deserialization=True)
-
 retrieval_chain = (
-    {'input' : (lambda x: x['input'])}
+    {'input' : (lambda x: x['input']), 'doc_index': (lambda x: x['doc_index'])}
+    # | RunnableAssign(
+    #     {'retriever': itemgetter('doc_index') | all_docstores_func }
+    # )
     | RunnableAssign(
-        {'context_raw' : itemgetter('input') 
-        | docstore.as_retriever() 
+        {'context_raw' : custom_chain
         | assert_docs
         | LongContextReorder().transform_documents
     })
@@ -244,6 +250,7 @@ def new_docstore(arxiv_list, vname, progress = gr.Progress()):
     
     ## Initialize an empty FAISS Index and merge others into it
     ## We'll use default_faiss for simplicity, though it's tied to your embedder by reference
+    
     agg_vstore = default_FAISS()
     for vstore in vecstores:
         agg_vstore.merge_from(vstore)
@@ -256,9 +263,6 @@ def new_docstore(arxiv_list, vname, progress = gr.Progress()):
     
     return "Index created!"
 
-
-## Unintuitive optimization; merge_from seems to optimize constituent vector stores away
-# docstore = aggregate_vstores(vecstores)
 
 #####################################################################
 ## ChatBot utilities
@@ -284,94 +288,19 @@ def add_message(message, history, role=0, preface=""):
 
 
 def add_text(history, text, llm_model, doc_index):
-    global instruct_llm, docstore, embedder
+    global instruct_llm
     instruct_llm = ChatNVIDIA(model=llm_model, api_key = nvidia_api_key)
-    docstore = FAISS.load_local(doc_index, embedder, allow_dangerous_deserialization=True)
+    # doccstore = all_docstores[doc_index]
     
     history = history + [(text, None)]
     return history, gr.Textbox(value="", interactive=False)
 
 
-def bot(history, chain_key):
+def bot(history, chain_key, doc_ind):
     chain = {'Basic' : basic_chain, 'RAG' : rag_chain}.get(chain_key)
-    msg_stream = chain.stream({'input':history[-1][0], 'history':history})
+    msg_stream = chain.stream({'input':history[-1][0], 'history':history, 'doc_index':doc_ind})
     for history, buffer, is_error in add_message(msg_stream, history, role=1):
         yield history
-
-
-#####################################################################
-## Document/Assessment Utilities
-
-
-def get_chunks(document):
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ".", ";", ",", " ", ""],
-    )
-    content = document[0].page_content
-    content = content.replace("{", "[").replace("}", "]")
-    if "References" in content:
-        content = content[:content.index("References")]
-    document[0].page_content = content
-    return text_splitter.split_documents(document)
-
-
-def get_day_difference(date_str):
-    given_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-    current_date = datetime.now().date()
-    difference = current_date - given_date
-    return difference.days
-
-
-def get_fresh_chunks(chunks):
-    return [
-        chunk for chunk in chunks 
-            if get_day_difference(chunk.metadata.get("Published", "2000-01-01")) < 90
-    ]
-
-
-def format_chunk(doc):
-    prep_str = lambda x: x.replace('{', '<').replace('}', '>')
-    return (
-        f"Paper: {prep_str(doc.metadata.get('Title', 'unknown'))}"
-        f"\n\nSummary: {prep_str(doc.metadata.get('Summary', 'unknown'))}"
-        f"\n\nPage Body: {prep_str(doc.page_content)}"
-    )
-
-
-def get_synth_prompt(docs):
-    doc1, doc2 = random.sample(docs, 2)
-    sys_msg = (
-        "Use the documents provided by the user to generate an interesting question-answer pair."
-        " Try to use both documents if possible, and rely more on the document bodies than the summary. Be specific!"
-        " Use the format:\nQuestion: (good question, 1-3 sentences, detailed)\n\nAnswer: (answer derived from the documents)"
-        " DO NOT SAY: \"Here is an interesting question pair\" or similar. FOLLOW FORMAT!"
-    )
-    usr_msg = f"Document1: {format_chunk(doc1)}\n\nDocument2: {format_chunk(doc2)}"
-    return ChatPromptTemplate.from_messages([('system', sys_msg), ('user', usr_msg)])
-
-
-def get_eval_prompt():
-    eval_instruction = (
-        "Evaluate the following Question-Answer pair for human preference and consistency."
-        "\nAssume the first answer is a ground truth answer and has to be correct."
-        "\nAssume the second answer may or may not be true."
-        "\n[1] The first answer is extremely preferable, or the second answer heavily deviates."
-        "\n[2] The second answer does not contradict the first and significantly improves upon it."
-        "\n\nOutput Format:"
-        "\nJustification\n[2] if 2 is strongly preferred, [1] otherwise"
-        "\n\nQuestion-Answer Pair:"
-        "\n{input}\n\n"
-        "[/INST]</s><s>[INST]Justification: "
-    )
-    return {"input" : lambda x:x} | ChatPromptTemplate.from_messages([('system', eval_instruction), ('user', '{input}')])
-
-
-## Document names, and the overall chunk list
-class Globals:
-    doc_names = set()
-    doc_chunks = []
 
 
 #####################################################################
@@ -390,10 +319,11 @@ def update_dropdown_options(text_input):
     options = text_input.split()  # Split text into words as options
     return gr.update(choices=glob.glob('*_docstore_index'))  # Update dropdown with new options
 
-def update_docstore(text_input):
-    # Example: Create dropdown options based on words in the textbox
-    global docstore
-    docstore = FAISS.load_local(text_input, embedder, allow_dangerous_deserialization=True)
+# def update_docstore(text_input):
+#     # Example: Create dropdown options based on words in the textbox
+#     global doccstore
+#     doccstore = FAISS.load_local(text_input, embedder, allow_dangerous_deserialization=True)
+#     return doccstore
         
 def get_demo():
     with gr.Blocks(css=CSS, theme=THEME) as demo:
@@ -437,7 +367,7 @@ def get_demo():
 
         progress_output.change(fn=update_dropdown_options, inputs=progress_output, outputs=doc_index)
         
-        doc_index.change(fn=update_docstore, inputs=doc_index, outputs=[])
+        # doc_index.input(fn=update_docstore, inputs=doc_index, outputs=progress_output)
 
 
         with gr.Row():
@@ -464,7 +394,7 @@ def get_demo():
                 queue=False             ## And don't use the function as a generator (so no streaming)!
             )
             # then update the chatbot with the bot response (same variable logic)
-            .then(bot, [chatbot, chain_btn], [chatbot])
+            .then(bot, [chatbot, chain_btn, doc_index], [chatbot])
             ## Then, unblock the textbox by assigning an active status to it
             .then(lambda: gr.Textbox(interactive=True), None, [txt], queue=False)
         )
