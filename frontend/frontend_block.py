@@ -36,9 +36,9 @@ import traceback
 from faiss import IndexFlatL2
 from langchain_community.docstore.in_memory import InMemoryDocstore
 
-nvidia_api_key = "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"
+# Access the environment variable
+nvidia_api_key = os.environ.get('NVIDIA_API_KEY')
 
-## TODO: Make sure to pick your LLM and do your prompt engineering as necessary for the final assessment
 embedder = NVIDIAEmbeddings(model="nvidia/nv-embed-v1", truncate="END", api_key = nvidia_api_key)
 
 instruct_llm = ChatNVIDIA(model="meta/llama-3.1-8b-instruct", api_key = nvidia_api_key)
