@@ -4,7 +4,8 @@ A web app allowing users to create vector stores from a provided list of arXiv a
 
 
 To Run the web app locally:
-You need to create an account at [NVIDIA explore](https://build.nvidia.com/explore/discover) and obtain your NVIDIA api key, then do
+create an account at [NVIDIA explore](https://build.nvidia.com/explore/discover) and obtain your NVIDIA api key, then do
+
 ```
 export NVIDIA_API_KEY="your-api-key"
 pip install -r requirements.txt
